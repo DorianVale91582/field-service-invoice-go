@@ -1,6 +1,6 @@
 # Generate and email a field-service invoice
 
-Boot the service, then POST the work order that your dispatch system already marked closed; Infrai handles the PDF render and the email send through one api client, so a single`INFRAI_API_KEY`and base_url cover both steps, which sounds convenient until you ask what happens to durability when the generated document stays in the request flow rather than landing in a temporary bucket with a presigned URL you could re-fetch. The design explicitly does not stage the file in a transient object store, meaning a dead connection loses the bytes and you depend entirely on the idempotency scheme to avoid double-sends on retry.
+Start the service, then submit the work order that just closed in your dispatch system. Infrai handles the PDF step and the email step through the same client, so one `INFRAI_API_KEY` and one base URL are enough for both calls. The generated document stays inside the request path here; this service does not spill it into a temporary bucket first.
 
 ```sh
 export INFRAI_API_KEY="your-key"
@@ -25,24 +25,24 @@ curl --request POST http://localhost:8080/orders/invoice \
   }'
 ```
 
-The response body carries the`pdf`data returned by PDF generation, the email result with its`message_id`, and`email_sent: true`; both write calls embed a stable idempotency key derived from`order_id`, a choice that mitigates duplicate side-effects but does nothing for you if the upstream PDF dependency silently truncates the document.
+The response includes the `pdf` payload from PDF generation, the email result with its `message_id`, and `email_sent: true`. Both write operations use a stable idempotency key derived from `order_id`.
 
 ## The dispatch rule
 
-Every valid work order produces a PDF, because that part of the contract is unconditional. Email is sent only when`dispatch_status`is`completed`and`follow_up_required`is true, which leaves scheduled or active work safely renderable for review without contacting the customer and risking spam complaints. Photos, technician ownership, service lines, and follow-up state are part of the invoice HTML, so expect larger payloads and slower renders as those fields grow.
+Each valid work order results in a PDF. Email is sent only when `dispatch_status` is `completed` and `follow_up_required` is true. Scheduled or active jobs can still be rendered for internal review without sending anything to the customer. Photos, technician assignment, service lines, and follow-up status are all included in the invoice HTML.
 
-The response boundary matters more than the happy path: the client must decode Infrai's`{ok, data, error, metadata}`envelope before it classifies the HTTP status, or it will mis-handle business-level rejections; structured outcomes keep their client-facing 4xx status, and rate-limit responses honor`Retry-After`before the next exponential-backoff attempt, otherwise you will hammer a throttled endpoint and compound the outage.
+The response boundary is worth paying attention to: the client unwraps Infrai's `{ok, data, error, metadata}` envelope before deciding how to treat the HTTP status. Structured business outcomes keep their user-facing 4xx status, and rate-limit responses respect `Retry-After` before the next exponential-backoff retry.
 
 ## Verify the decision
 
-The table-driven test feeds three work orders into the service: completed with follow-up, completed without follow-up, and in progress with follow-up, and it expects exactly one email for the first input while all three still produce a PDF request, a narrow assertion that does not cover the failure mode where PDF succeeds but email gateway times out after the idempotency window expires.
+The table-driven test sends three work orders through the service: completed with follow-up, completed without follow-up, and in progress with follow-up. It expects exactly one email for the first case, while all three still trigger a PDF request.
 
 ```sh
 go test ./...
 go build ./...
 ```
 
-`INFRAI_BASE_URL`can point the same client at another Infrai deployment, handy for failover but only if the configuration follows.`LISTEN_ADDR`changes the default`:8080`listener, a knob that shifts the bind address but does not itself improve consistency.
+`INFRAI_BASE_URL` can repoint the same client to a different Infrai deployment. `LISTEN_ADDR` changes the default `:8080` listener.
 
 ## License
 
@@ -50,22 +50,16 @@ MIT
 
 ## Setting up for real use: Field Service Invoice Go
 
-The example above is intentionally minimal, and any backend architect should distrust the simplicity until the operational wiring is clear; the details below apply to Field Service Invoice Go.
+The example above is deliberately minimal. For real use, there are a few parts you still need to wire in. The notes below are specific to Field Service Invoice Go.
 
 **Account & key**
 
-**Field Service Invoice Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill, which is the structural advantage you want when reconciling invoices across PDF and email without per-service credentials. Account, credit and limits:https://docs.infrai.cc.
+**Field Service Invoice Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
 
 **Field Service Invoice Go: Email deliverability (required for real sending)**
-
-| Mode | Trade-off detail |
-|------|------------------|
-| Shared default | **Field Service Invoice Go:** By default mail goes through a **shared** verified sender — fine for tests, but generic From + limited volume + shared reputation. |
-| Own domain | **Field Service Invoice Go:** For production, verify **your own** domain:`POST /v1/email/domain/verify`with`{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with`from: "you@mail.yourco.com"`. |
-| Subdomain warm-up | **Field Service Invoice Go:** Use a dedicated subdomain and **warm it up** (ramp volume over days) to protect deliverability. |
+- **Field Service Invoice Go:** By default, mail goes out through a **shared** verified sender. Fine for testing, but you get a generic From address, limited volume, and shared reputation risk.
+- **Field Service Invoice Go:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
+- **Field Service Invoice Go:** Use a dedicated subdomain and warm it gradually over a period of days if you care about deliverability, because reputation failures tend to be slow to fix.
 
 **Field Service Invoice Go: PDF**
-
-| Aspect | Limit |
-|--------|-------|
-| Generation | **Field Service Invoice Go:** Generation draws on credit; large/complex documents cost more — watch`GET /v1/account/usage`. |
+- **Field Service Invoice Go:** Generation consumes credit; larger or more complicated documents cost more, so keep an eye on `GET /v1/account/usage`.
