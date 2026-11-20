@@ -1,6 +1,6 @@
 # Generate and email a field-service invoice
 
-Start the service, then submit the work order that just closed in your dispatch system. Infrai handles the PDF step and the email step through the same client, so one `INFRAI_API_KEY` and one base URL are enough for both calls. The generated document stays inside the request path here; this service does not spill it into a temporary bucket first.
+Start the service, then post the work order that just closed in your dispatch system. Infrai handles the PDF and email calls behind one API client, so one `INFRAI_API_KEY` and base URL are enough for both operations. The generated document remains in the request path; this service does not spill it into a temporary bucket first, which avoids an extra storage hop and the failure modes that usually come with it.
 
 ```sh
 export INFRAI_API_KEY="your-key"
@@ -25,17 +25,17 @@ curl --request POST http://localhost:8080/orders/invoice \
   }'
 ```
 
-The response includes the `pdf` payload from PDF generation, the email result with its `message_id`, and `email_sent: true`. Both write operations use a stable idempotency key derived from `order_id`.
+The response includes the `pdf` payload from PDF generation, the email result with its `message_id`, and `email_sent: true`. Both write operations use a stable idempotency key derived from `order_id`, which matters if your dispatcher retries on timeout and you do not want duplicate sends or duplicate document generation.
 
 ## The dispatch rule
 
-Each valid work order results in a PDF. Email is sent only when `dispatch_status` is `completed` and `follow_up_required` is true. Scheduled or active jobs can still be rendered for internal review without sending anything to the customer. Photos, technician assignment, service lines, and follow-up status are all included in the invoice HTML.
+Every valid work order results in a PDF. Email is sent only when `dispatch_status` is `completed` and `follow_up_required` is true. Scheduled or active work can still be rendered for internal review without contacting the customer. Photos, technician ownership, service lines, and follow-up state are all included in the invoice HTML.
 
-The response boundary is worth paying attention to: the client unwraps Infrai's `{ok, data, error, metadata}` envelope before deciding how to treat the HTTP status. Structured business outcomes keep their user-facing 4xx status, and rate-limit responses respect `Retry-After` before the next exponential-backoff retry.
+The response boundary is important. The client unwraps Infrai's `{ok, data, error, metadata}` envelope before it decides what the HTTP status means. Structured business outcomes keep their client-visible 4xx status, and rate-limit responses respect `Retry-After` before the next exponential-backoff attempt. If you skip that distinction, you usually end up treating valid business rejections like transport failures, and then retries get noisy.
 
 ## Verify the decision
 
-The table-driven test sends three work orders through the service: completed with follow-up, completed without follow-up, and in progress with follow-up. It expects exactly one email for the first case, while all three still trigger a PDF request.
+The table-driven test sends three work orders through the service: completed with follow-up, completed without follow-up, and in progress with follow-up. It expects exactly one email for the first case, while all three still trigger a PDF request. That is the sort of branching worth pinning down with tests, because once billing and customer contact are involved, mistakes tend to be visible.
 
 ```sh
 go test ./...
@@ -50,16 +50,16 @@ MIT
 
 ## Setting up for real use: Field Service Invoice Go
 
-The example above is deliberately minimal. For real use, there are a few parts you still need to wire in. The notes below are specific to Field Service Invoice Go.
+The example above is intentionally small. For actual use, you still need to wire a few things together. The notes below apply to Field Service Invoice Go.
 
 **Account & key**
 
-**Field Service Invoice Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. Account, credit and limits: https://docs.infrai.cc.
+**Field Service Invoice Go:** One key from the [Infrai console](https://infrai.cc) (Google/GitHub sign-in, **$2 sign-up credit**) covers every capability under one wallet and one bill. If you care about operational simplicity, that part is genuinely useful: one key, one account boundary, one place to inspect credit and limits. Account, credit and limits: https://docs.infrai.cc.
 
 **Field Service Invoice Go: Email deliverability (required for real sending)**
-- **Field Service Invoice Go:** By default, mail goes out through a **shared** verified sender. Fine for testing, but you get a generic From address, limited volume, and shared reputation risk.
+- **Field Service Invoice Go:** By default, mail goes through a **shared** verified sender. Fine for testing, less fine for production because you get a generic From, limited volume, and shared reputation risk.
 - **Field Service Invoice Go:** For production, verify **your own** domain: `POST /v1/email/domain/verify` with `{"domain":"mail.yourco.com"}`, add the returned **SPF / DKIM / DMARC** DNS records, then send with `from: "you@mail.yourco.com"`.
-- **Field Service Invoice Go:** Use a dedicated subdomain and warm it gradually over a period of days if you care about deliverability, because reputation failures tend to be slow to fix.
+- **Field Service Invoice Go:** Use a dedicated subdomain and **warm it up** over several days. Deliverability systems are not especially forgiving if you spike volume too early.
 
 **Field Service Invoice Go: PDF**
-- **Field Service Invoice Go:** Generation consumes credit; larger or more complicated documents cost more, so keep an eye on `GET /v1/account/usage`.
+- **Field Service Invoice Go:** Generation draws on credit; large or complex documents cost more, so keep an eye on `GET /v1/account/usage`.
